@@ -897,7 +897,11 @@ img { max-width: 100%; }
   function persist(){
     try {
       localStorage.setItem('kasi-playlists', JSON.stringify(state.playlists));
-      localStorage.setItem('kasi-saved', JSON.stringify(ALL_TRACKS.filter(t => t.saved).map(t => t.id)));
+      // Only save the saved-list once the songs have loaded, so an empty
+      // start-up doesn't wipe the user's saved songs.
+      if (ALL_TRACKS.length){
+        localStorage.setItem('kasi-saved', JSON.stringify(ALL_TRACKS.filter(t => t.saved).map(t => t.id)));
+      }
     } catch (e) {}
   }
   function loadSavedIds(){
