@@ -287,7 +287,7 @@ input[type=range]::-moz-range-thumb{width:12px;height:12px;border:0;border-radiu
 .drawer-head .logo{font-size:16px}
 .drawer-head .who2{margin-left:auto;font-size:11.5px;color:var(--muted)}
 
-#tabs{position:fixed;bottom:0;left:0;right:0;display:grid;grid-template-columns:repeat(4,1fr);height:62px;background:var(--card);border-top:1px solid var(--line);z-index:300;padding-bottom:env(safe-area-inset-bottom,0)}
+#tabs{position:fixed;bottom:0;left:0;right:0;display:grid;grid-template-columns:repeat(5,1fr);height:62px;background:var(--card);border-top:1px solid var(--line);z-index:300;padding-bottom:env(safe-area-inset-bottom,0)}
 @media(min-width:900px){#tabs{display:none}}
 #tabs button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:var(--muted);font-size:9.5px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;transition:color .14s}
 #tabs button svg{width:20px;height:20px}
@@ -588,6 +588,7 @@ img { max-width: 100%; }
 <nav id="tabs">
   <button data-tab="home" class="active"><svg><use href="#i-home"/></svg>Home</button>
   <button data-tab="search"><svg><use href="#i-search"/></svg>Search</button>
+  <button data-tab="playlists"><svg><use href="#i-folder"/></svg>Playlists</button>
   <button data-tab="saved"><svg><use href="#i-lib"/></svg>Saved</button>
   <button data-tab="you"><svg><use href="#i-user"/></svg>You</button>
 </nav>
@@ -761,7 +762,7 @@ img { max-width: 100%; }
       src: t.audio,
       duration: t.duration || 0,
       saved: false,
-      license: t.license_ccurl || ''
+      license: t.license_ccurl || '', download: t.audiodownload || t.audio || ''
     }));
   }
 
@@ -770,7 +771,9 @@ img { max-width: 100%; }
     GENRES = Object.keys(GENRE_TAGS).filter(g => TRACKS.some(t => t.genre === g));
     CATALOG = {};
     GENRES.forEach(g => { CATALOG[g] = TRACKS.filter(t => t.genre === g); });
-    if (state.playlists[0]) state.playlists[0].tracks = ALL_TRACKS.slice(0, 6);
+    const savedIds = loadSavedIds();
+    TRACKS.forEach(t => { t.saved = savedIds.has(t.id); });
+
   }
 
   /* ═══════════ ADMIN ═══════════ */
@@ -880,10 +883,28 @@ img { max-width: 100%; }
   }
 
   /* ═══════════ STATE ═══════════ */
+  function loadPlaylists(){
+    try {
+      const saved = JSON.parse(localStorage.getItem('kasi-playlists'));
+      if (Array.isArray(saved) && saved.length) return saved;
+    } catch (e) {}
+    return [{ id: 'p1', name: 'My Mix', tracks: [], public: true }];
+  }
+  function persist(){
+    try {
+      localStorage.setItem('kasi-playlists', JSON.stringify(state.playlists));
+      localStorage.setItem('kasi-saved', JSON.stringify(ALL_TRACKS.filter(t => t.saved).map(t => t.id)));
+    } catch (e) {}
+  }
+  function loadSavedIds(){
+    try { return new Set(JSON.parse(localStorage.getItem('kasi-saved')) || []); }
+    catch (e) { return new Set(); }
+  }
+
   const state = {
     view: 'home',
     user: { name: 'You', email: 'you@kasi.fm' },
-    playlists: [{ id: 'p1', name: 'My Mix', tracks: ALL_TRACKS.slice(0, 6), public: true }],
+    playlists: loadPlaylists(),
     currentPlaylistId: null,
     queue: [], qIndex: -1,
     playing: false, progress: 0,
@@ -1008,6 +1029,7 @@ img { max-width: 100%; }
 
   /* ═══════════ RENDER ═══════════ */
   function render(){
+    persist();
     renderSidebar();
     const body = $('body'), actions = $('pageActions');
     const title = $('pageTitle'), sub = $('pageSub');
@@ -1084,7 +1106,7 @@ img { max-width: 100%; }
       title.textContent = pl.name;
       sub.textContent = pl.tracks.length + ' tracks · ' + (pl.public ? 'public' : 'private');
       actions.innerHTML = `
-        <button class="btn2" id="dlAllBtn"><svg width="14" height="14"><use href="#i-download"/></svg> Download all</button>
+        <button class="btn2" id="dlAllBtn"><svg width="14" height="14"><use href="#i-download"/></svg> Save all</button>
         <button class="btn2 ghost" id="editPlBtn">Edit</button>`;
       $('dlAllBtn').onclick = () => { pl.tracks.forEach(t => t.saved = true); toast('Downloaded ' + pl.tracks.length + ' tracks'); render(); };
       $('editPlBtn').onclick = () => { const name = prompt('Rename playlist:', pl.name); if (!name?.trim()) return; pl.name = name.trim(); toast('Renamed'); render(); };
@@ -1238,7 +1260,8 @@ img { max-width: 100%; }
         <div class="album">${esc(t.album)}</div>
         <div class="time">${fmt(t.duration)}</div>
         <div class="acts">
-          <button class="ibtn-sm ${t.saved ? 'on' : ''}" data-act="save"><svg width="13" height="13"><use href="#${t.saved ? 'i-check' : 'i-download'}"/></svg></button>
+          <button class="ibtn-sm ${t.saved ? 'on' : ''}" data-act="save" aria-label="Save"><svg width="13" height="13"><use href="#${t.saved ? 'i-heart-fill' : 'i-heart'}"/></svg></button>
+          <button class="ibtn-sm" data-act="dl" aria-label="Download"><svg width="13" height="13"><use href="#i-download"/></svg></button>
           <button class="ibtn-sm" data-act="add"><svg width="13" height="13"><use href="#i-plus"/></svg></button>
           ${opts.playlistId ? '<button class="ibtn-sm danger" data-act="rm"><svg width="13" height="13"><use href="#i-minus"/></svg></button>' : ''}
         </div>`;
@@ -1246,6 +1269,7 @@ img { max-width: 100%; }
         const act = e.target.closest('[data-act]')?.dataset.act;
         if (act === 'save'){ e.stopPropagation(); t.saved = !t.saved; toast(t.saved ? 'Saved "' + t.title + '"' : 'Removed'); render(); return; }
         if (act === 'add'){ e.stopPropagation(); addToPlaylist(t); return; }
+        if (act === 'dl'){ e.stopPropagation(); window.open(t.download || t.src, '_blank'); toast('Opening download for "' + t.title + '"', 3000); return; }
         if (act === 'rm'){
           e.stopPropagation();
           const pl = state.playlists.find(p => p.id === opts.playlistId);
@@ -1308,19 +1332,54 @@ img { max-width: 100%; }
   }
 
   function addToPlaylist(t){
-    if (!state.playlists.length){
-      const name = prompt('No playlists yet. Name your first one:');
-      if (!name?.trim()) return;
-      state.playlists.push({ id: 'p' + Date.now(), name: name.trim(), tracks: [], public: true });
-    }
-    const list = state.playlists.map((p, i) => (i+1) + '. ' + p.name).join('\n');
-    const pick = prompt('Add "' + t.title + '" to which playlist?\n\n' + list);
-    const idx = Number(pick) - 1;
-    if (!Number.isInteger(idx) || !state.playlists[idx]) return;
-    const pl = state.playlists[idx];
-    if (pl.tracks.some(x => x.id === t.id)){ toast('Already in "' + pl.name + '"'); return; }
-    pl.tracks.push(t);
-    toast('Added to "' + pl.name + '"');
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:900;display:flex;align-items:flex-end;justify-content:center;padding:16px';
+    const box = document.createElement('div');
+    box.style.cssText = 'width:100%;max-width:420px;background:var(--card);border:1px solid var(--line2);border-radius:16px;padding:18px;max-height:80vh;overflow-y:auto';
+    box.innerHTML = '<div style="font-weight:700;margin-bottom:4px">Add to playlist</div>' +
+      '<div style="color:var(--muted);font-size:12.5px;margin-bottom:14px">' + esc(t.title) + '</div>';
+
+    const close = () => overlay.remove();
+    const addTo = (pl) => {
+      if (pl.tracks.some(x => x.id === t.id)){ toast('Already in "' + pl.name + '"'); close(); return; }
+      pl.tracks.push(t);
+      toast('Added to "' + pl.name + '"');
+      close();
+      render();
+    };
+
+    state.playlists.forEach(pl => {
+      const b = document.createElement('button');
+      b.className = 'nav';
+      b.style.marginBottom = '6px';
+      b.textContent = pl.name + ' (' + pl.tracks.length + ')';
+      b.onclick = () => addTo(pl);
+      box.appendChild(b);
+    });
+
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;margin-top:12px';
+    row.innerHTML = '<input placeholder="New playlist name" style="flex:1;min-width:0;padding:10px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:10px;font-size:16px">' +
+      '<button class="btn2" style="flex:none">Create</button>';
+    row.querySelector('button').onclick = () => {
+      const name = row.querySelector('input').value.trim();
+      if (!name){ toast('Type a name first'); return; }
+      const pl = { id: 'p' + Date.now(), name: name, tracks: [], public: true };
+      state.playlists.push(pl);
+      addTo(pl);
+    };
+    box.appendChild(row);
+
+    const cancel = document.createElement('button');
+    cancel.className = 'nav';
+    cancel.style.marginTop = '8px';
+    cancel.textContent = 'Cancel';
+    cancel.onclick = close;
+    box.appendChild(cancel);
+
+    overlay.appendChild(box);
+    overlay.onclick = e => { if (e.target === overlay) close(); };
+    document.body.appendChild(overlay);
   }
 
   /* ═══════════ PLAYBACK ═══════════ */
@@ -1511,6 +1570,7 @@ img { max-width: 100%; }
       if (t === 'home') go('home');
       if (t === 'search') $('search').focus();
       if (t === 'saved') go('saved');
+      if (t === 'playlists') go('playlists');
       if (t === 'you') go('people');
     };
   });
