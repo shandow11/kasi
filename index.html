@@ -618,6 +618,7 @@ img { max-width: 100%; }
       <button class="pp" id="npPlay"><svg width="24" height="24"><use href="#i-play"/></svg></button>
       <button id="npNext"><svg width="22" height="22"><use href="#i-next"/></svg></button>
       <button id="npRep"><svg width="18" height="18"><use href="#i-repeat"/></svg></button>
+      <button id="npSleep" aria-label="Sleep timer" style="min-width:64px;width:auto;padding:0 10px;font-size:12px;font-weight:600;border:1px solid var(--line);border-radius:999px">Sleep</button>
     </div>
     <div class="np-sec">
       <button id="npSave"><svg width="18" height="18"><use href="#i-heart"/></svg></button>
@@ -719,7 +720,9 @@ img { max-width: 100%; }
     'Ambient': 'ambient', 'Lo-Fi': 'lofi', 'Jazz': 'jazz', 'Electronic': 'electronic',
     'Hip-Hop': 'hiphop', 'Pop': 'pop', 'R&B / Love': 'rnb',
     'Chill': 'chillout', 'Rock': 'rock', 'Classical': 'classical',
-    'Folk': 'folk', 'Reggae': 'reggae', 'Soul': 'soul'
+    'Folk': 'folk', 'Reggae': 'reggae', 'Soul': 'soul',
+    'Amapiano': 'afrohouse', 'Afrobeats': 'afrobeat',
+    'African': 'african', 'Afropop': 'afropop', 'Highlife': 'highlife', 'Kwaito': 'kwaito', 'Afro Soul': 'afrosoul', 'Gqom': 'gqom'
   };
   const GENRE_COLORS = {
     'Trending':    ['#8B2635', '#5a1823'],
@@ -732,6 +735,7 @@ img { max-width: 100%; }
     'Jazz':        ['#8a5a1e', '#4a3010'],
     'Amapiano':    ['#d4743a', '#7a3d1a'],
     'Afrobeats':   ['#c49b1e', '#6a5312'],
+    'African': ['#8a6b1e','#4a3510'], 'Afropop': ['#d43a7a','#6a1a3a'], 'Highlife': ['#2a7a9a','#143d4d'], 'Kwaito': ['#9a5a2a','#4d2c15'], 'Afro Soul': ['#7a3a9a','#3a1a4d'], 'Gqom': ['#2a9a6a','#14503a']
   };
 
   let TRACKS = [];
@@ -1162,8 +1166,62 @@ img { max-width: 100%; }
   }
 
   /* ═══════════ HOME ═══════════ */
+  /* ═════════ MAINSTREAM (Deezer, display and link only) ═════════ */
+  function deezerSearch(q){
+    return new Promise((resolve, reject) => {
+      const cb = 'dz' + Date.now() + Math.floor(Math.random() * 1000);
+      const script = document.createElement('script');
+      const done = () => { delete window[cb]; script.remove(); };
+      window[cb] = data => { done(); resolve((data && data.data) || []); };
+      script.onerror = () => { done(); reject(new Error('Deezer request failed')); };
+      script.src = 'https://api.deezer.com/search?q=' + encodeURIComponent(q) +
+        '&limit=20&output=jsonp&callback=' + cb;
+      document.body.appendChild(script);
+    });
+  }
+
+  function renderMainstreamResults(container, items){
+    container.innerHTML = '';
+    if (!items.length){ container.innerHTML = '<div class="empty">No results.</div>'; return; }
+    items.forEach(t => {
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.style.cursor = 'default';
+      row.innerHTML = `
+        <div class="cover-sm"><img src="${esc(t.album && t.album.cover_medium || '')}" loading="lazy" alt=""></div>
+        <div style="min-width:0"><div class="title">${esc(t.title)}</div><div class="artist">${esc(t.artist && t.artist.name || '')}</div></div>
+        <div></div>
+        <a class="btn2 ghost" style="flex:none;text-decoration:none;padding:8px 12px;min-height:34px" href="${esc(t.link || '')}" target="_blank" rel="noopener">Open on Deezer</a>`;
+      container.appendChild(row);
+    });
+  }
+
   function renderHome(body){
     body.innerHTML = '';
+
+    const mSec = document.createElement('div');
+    mSec.className = 'home-section';
+    mSec.innerHTML = `
+      <div class="home-head"><h3>Mainstream search</h3></div>
+      <div class="row" style="cursor:default;grid-template-columns:1fr auto;gap:8px;min-height:0">
+        <input id="mainQ" placeholder="Search artists or songs on Deezer" style="padding:10px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:10px;font-size:16px;min-width:0">
+        <button class="btn2" id="mainBtn" style="flex:none">Search</button>
+      </div>
+      <div class="muted" style="margin:6px 0 10px">Results come from Deezer. Click "Open on Deezer" to listen there.</div>
+      <div id="mainResults"></div>`;
+    body.appendChild(mSec);
+    const run = async () => {
+      const q = mSec.querySelector('#mainQ').value.trim();
+      if (!q){ toast('Type a name first'); return; }
+      mSec.querySelector('#mainResults').innerHTML = '<div class="empty"><span class="spinner"></span>Searching Deezer…</div>';
+      try {
+        renderMainstreamResults(mSec.querySelector('#mainResults'), await deezerSearch(q));
+      } catch (e) {
+        mSec.querySelector('#mainResults').innerHTML = '<div class="empty">Could not reach Deezer. Check your connection.</div>';
+      }
+    };
+    mSec.querySelector('#mainBtn').onclick = run;
+    mSec.querySelector('#mainQ').onkeydown = e => { if (e.key === 'Enter') run(); };
 
     // ═══ PLAY YOUR PLAYLISTS ═══
     const plSection = document.createElement('div');
@@ -1519,6 +1577,51 @@ img { max-width: 100%; }
   }
 
   /* ═══════════ CONTROLS ═══════════ */
+  /* ═════════ SLEEP TIMER ═════════ */
+  const SLEEP_STEPS = [0, 15, 30, 60];
+  let sleepStep = 0, sleepTimeout = null, sleepRefresh = null, sleepEnd = 0;
+
+  function updateSleepBtn(){
+    const b = $('npSleep');
+    if (!sleepEnd){
+      b.textContent = 'Sleep';
+      b.style.color = '';
+      b.style.borderColor = 'var(--line)';
+      return;
+    }
+    const mins = Math.max(1, Math.ceil((sleepEnd - Date.now()) / 60000));
+    b.textContent = 'Sleep ' + mins + 'm';
+    b.style.color = 'var(--gold)';
+    b.style.borderColor = 'var(--gold)';
+  }
+
+  function clearSleep(){
+    clearTimeout(sleepTimeout);
+    clearInterval(sleepRefresh);
+    sleepTimeout = null; sleepRefresh = null; sleepEnd = 0;
+  }
+
+  function setSleep(minutes){
+    clearSleep();
+    if (!minutes){ updateSleepBtn(); toast('Sleep timer off'); return; }
+    sleepEnd = Date.now() + minutes * 60000;
+    sleepTimeout = setTimeout(() => {
+      clearSleep();
+      state.playing = false;
+      syncAudio(); updatePlayer(); render();
+      updateSleepBtn();
+      toast('Sleep timer ended. Music stopped.', 4000);
+    }, minutes * 60000);
+    sleepRefresh = setInterval(updateSleepBtn, 30000);
+    updateSleepBtn();
+    toast('Music will stop in ' + minutes + ' minutes', 3000);
+  }
+
+  $('npSleep').onclick = () => {
+    sleepStep = (sleepStep + 1) % SLEEP_STEPS.length;
+    setSleep(SLEEP_STEPS[sleepStep]);
+  };
+
   $('miniPlay').onclick = e => { e.stopPropagation(); if (!state.queue.length){ toast('Pick a track first'); return; } state.playing = !state.playing; syncAudio(); updatePlayer(); render(); };
   $('playD').onclick = () => { if (!state.queue.length){ toast('Pick a track first'); return; } state.playing = !state.playing; syncAudio(); updatePlayer(); render(); };
   $('nextBtn').onclick = () => nextTrack(false);
