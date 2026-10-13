@@ -857,7 +857,7 @@ img { max-width: 100%; }
   }
 
   /* ═════════ UPLOADS (Cloudflare Worker + Supabase) ═════════ */
-  const WORKER_URL = "https://kali-stream.petruslifeline.workers.dev";
+  const WORKER_URL = "https://kali.petruslifeline.workers.dev";
 
   function renderUpload(body){
     body.innerHTML = `
@@ -921,7 +921,7 @@ img { max-width: 100%; }
       $('upOwn').checked = false;
       loadMyUploads();
     } catch (err) {
-      say("Couldn't reach the upload server. Check your connection.");
+      say("Couldn't reach the upload server: " + err.message);
     } finally {
       $('upBtn').disabled = false;
     }
