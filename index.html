@@ -528,6 +528,7 @@ img { max-width: 100%; }
       <div class="side-label">Social</div>
       <button class="nav" data-view="explore"><svg width="18" height="18"><use href="#i-globe"/></svg> Explore</button>
       <button class="nav" data-view="people"><svg width="18" height="18"><use href="#i-users"/></svg> People</button>
+      <button class="nav" data-view="messages"><svg width="18" height="18"><use href="#i-lib"/></svg> Messages</button>
       <button class="nav" data-view="feed"><svg width="18" height="18"><use href="#i-feed"/></svg> Feed</button>
       <div class="side-label">Browse</div>
       <div id="genresNav"></div>
@@ -987,6 +988,297 @@ img { max-width: 100%; }
     });
   }
 
+  /* ═════════ SOCIAL (profiles, follows, messages) ═════════ */
+  const profileCache = {};
+  async function getProfile(id){
+    if (profileCache[id]) return profileCache[id];
+    if (!sb) return null;
+    const { data } = await sb.from('profiles').select('id, username, display_name').eq('id', id).maybeSingle();
+    if (data) profileCache[id] = data;
+    return data;
+  }
+  function nameOf(id){ const p = profileCache[id]; return p ? '@' + p.username : 'Loading…'; }
+  async function ensureProfiles(ids){ await Promise.all([...new Set(ids)].map(getProfile)); }
+
+  async function followingIds(){
+    if (!sb || !state.uid) return new Set();
+    const { data } = await sb.from('follows').select('followed_id').eq('follower_id', state.uid);
+    return new Set((data || []).map(r => r.followed_id));
+  }
+
+  function uploadTrack(u){
+    return {
+      id: 'up-' + u.id, title: u.title, artist: u.artist || 'Unknown', album: u.album || 'Uploads',
+      genre: 'Uploads', art: DEFAULT_ART, duration: 0, saved: false, license: 'Uploaded by a user',
+      src: WORKER_URL + '/stream/' + encodeURIComponent(u.file_key),
+    };
+  }
+
+  function renderSocial(body){
+    body.innerHTML = `
+      <div class="home-head"><h3>Your profile</h3></div>
+      <div id="mePanel" class="muted">Loading…</div>
+      <div class="home-head" style="margin-top:24px"><h3>Find people</h3></div>
+      <div style="display:flex;gap:8px">
+        <input id="findQ" placeholder="Search usernames" style="flex:1;min-width:0;padding:10px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:10px;font-size:16px">
+        <button class="btn2" id="findBtn" style="flex:none">Search</button>
+      </div>
+      <div id="findResults" style="margin-top:10px"></div>
+      <div class="home-head" style="margin-top:24px"><h3>Following</h3></div>
+      <div id="followingList" class="muted">Loading…</div>`;
+    body.querySelector('#findBtn').onclick = () => findPeople(body.querySelector('#findQ').value);
+    body.querySelector('#findQ').onkeydown = e => { if (e.key === 'Enter') findPeople(e.target.value); };
+    renderMyPanel();
+    renderFollowing();
+  }
+
+  async function renderMyPanel(){
+    const box = $('mePanel'); if (!box) return;
+    if (!sb){ box.textContent = SETUP_MSG; return; }
+    const { data: me } = await sb.from('profiles').select('id, username, display_name').eq('id', state.uid).maybeSingle();
+    if (me){
+      profileCache[me.id] = me;
+      box.innerHTML = `<div style="margin-bottom:8px">You are <b>@${esc(me.username)}</b></div>
+        <div style="display:flex;gap:8px">
+          <input id="meName" placeholder="Display name (optional)" value="${esc(me.display_name || '')}" style="flex:1;min-width:0;padding:10px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:10px;font-size:16px">
+          <button class="btn2 ghost" id="meSave" style="flex:none">Save</button>
+        </div>`;
+      box.querySelector('#meSave').onclick = async () => {
+        const dn = box.querySelector('#meName').value.trim().slice(0, 40);
+        const { error } = await sb.from('profiles').update({ display_name: dn }).eq('id', state.uid);
+        if (error) return toast('Failed: ' + error.message, 4000);
+        delete profileCache[state.uid];
+        toast('Saved');
+        renderMyPanel();
+      };
+      return;
+    }
+    box.innerHTML = `<div style="margin-bottom:8px">Choose a username so friends can find you (3–20 letters, numbers, or _).</div>
+      <div style="display:flex;gap:8px">
+        <input id="meUser" placeholder="username" style="flex:1;min-width:0;padding:10px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:10px;font-size:16px">
+        <button class="btn2" id="meCreate" style="flex:none">Save</button>
+      </div>`;
+    box.querySelector('#meCreate').onclick = async () => {
+      const u = box.querySelector('#meUser').value.trim().toLowerCase();
+      if (!/^[a-z0-9_]{3,20}$/.test(u)) return toast('Use 3–20 letters, numbers, or _');
+      const { error } = await sb.from('profiles').insert({ id: state.uid, username: u, display_name: state.user.name });
+      if (error) return toast(error.code === '23505' ? 'That username is taken' : 'Failed: ' + error.message, 4000);
+      toast('Welcome, @' + u);
+      renderMyPanel();
+    };
+  }
+
+  function personRow(p, isFollowing){
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.style.cssText = 'cursor:pointer;grid-template-columns:1fr auto;min-height:0';
+    row.innerHTML = `<div style="min-width:0"><div class="title">@${esc(p.username)}</div><div class="artist">${esc(p.display_name || '')}</div></div>
+      <button class="btn2 ${isFollowing ? 'ghost' : ''}" style="flex:none;padding:8px 14px;min-height:34px">${isFollowing ? 'Following' : 'Follow'}</button>`;
+    row.onclick = (e) => {
+      if (e.target.closest('button')){ e.stopPropagation(); toggleFollow(p.id, isFollowing); return; }
+      openProfile(p.id);
+    };
+    return row;
+  }
+
+  async function findPeople(q){
+    const out = $('findResults'); if (!out || !sb) return;
+    q = (q || '').trim().toLowerCase();
+    if (!q){ out.innerHTML = ''; return; }
+    const { data, error } = await sb.from('profiles').select('id, username, display_name').ilike('username', '%' + q + '%').limit(20);
+    if (error){ out.textContent = 'Search failed: ' + error.message; return; }
+    const others = (data || []).filter(p => p.id !== state.uid);
+    if (!others.length){ out.innerHTML = '<div class="muted">No one found.</div>'; return; }
+    const following = await followingIds();
+    out.innerHTML = '';
+    others.forEach(p => { profileCache[p.id] = p; out.appendChild(personRow(p, following.has(p.id))); });
+  }
+
+  async function renderFollowing(){
+    const box = $('followingList'); if (!box || !sb) return;
+    const { data, error } = await sb.from('follows').select('followed_id').eq('follower_id', state.uid);
+    if (error){ box.textContent = 'Could not load: ' + error.message; return; }
+    if (!data.length){ box.textContent = 'You are not following anyone yet.'; return; }
+    const ids = data.map(r => r.followed_id);
+    await ensureProfiles(ids);
+    box.innerHTML = '';
+    ids.forEach(id => { const p = profileCache[id]; if (p) box.appendChild(personRow(p, true)); });
+  }
+
+  async function toggleFollow(id, wasFollowing){
+    if (!sb) return toast(SETUP_MSG, 4000);
+    const { error } = wasFollowing
+      ? await sb.from('follows').delete().eq('follower_id', state.uid).eq('followed_id', id)
+      : await sb.from('follows').insert({ follower_id: state.uid, followed_id: id });
+    if (error) return toast('Failed: ' + error.message, 4000);
+    await getProfile(id);
+    toast(wasFollowing ? 'Unfollowed ' + nameOf(id) : 'Following ' + nameOf(id));
+    render();
+  }
+
+  function openProfile(id){ state.view = 'profile'; state.profileId = id; state.artistView = null; render(); }
+
+  async function renderProfile(body, title, sub){
+    const id = state.profileId;
+    const p = await getProfile(id);
+    if (!p){ body.innerHTML = '<div class="empty">Profile not found.</div>'; return; }
+    title.textContent = '@' + p.username;
+    sub.textContent = p.display_name || '';
+    const following = (await followingIds()).has(id);
+    body.innerHTML = `
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn2 ${following ? 'ghost' : ''}" id="pFollow">${following ? 'Following' : 'Follow'}</button>
+        <button class="btn2 ghost" id="pMsg" ${following ? '' : 'disabled style="opacity:.5"'}>Message</button>
+      </div>
+      <div class="muted" style="margin:10px 0 14px">${following ? '' : 'Follow this person to see their playlists and uploads, and to message them.'}</div>
+      <div class="home-head"><h3>Playlists</h3></div><div id="pPlaylists" class="muted">Loading…</div>
+      <div class="home-head" style="margin-top:24px"><h3>Uploads</h3></div><div id="pUploads" class="muted">Loading…</div>`;
+    body.querySelector('#pFollow').onclick = () => toggleFollow(id, following);
+    if (following) body.querySelector('#pMsg').onclick = () => openChat(id);
+    if (!following){
+      $('pPlaylists').textContent = 'Follow to see playlists.';
+      $('pUploads').textContent = 'Follow to see uploads.';
+      return;
+    }
+    const [pl, up] = await Promise.all([
+      sb.from('playlists').select('id, name, tracks').eq('owner_id', id).order('created_at', { ascending: false }),
+      sb.from('uploads').select('id, title, artist, album, file_key').eq('user_id', id).order('created_at', { ascending: false }),
+    ]);
+    const plBox = $('pPlaylists'), upBox = $('pUploads');
+    if (pl.error){ plBox.textContent = 'Could not load: ' + pl.error.message; }
+    else if (!pl.data.length){ plBox.textContent = 'No published playlists.'; }
+    else {
+      plBox.innerHTML = '';
+      pl.data.forEach(item => {
+        const row = document.createElement('div');
+        row.className = 'row';
+        row.style.cssText = 'cursor:pointer;grid-template-columns:1fr auto;min-height:0';
+        row.innerHTML = `<div style="min-width:0"><div class="title">${esc(item.name)}</div><div class="artist">${(item.tracks || []).length} tracks</div></div><div class="muted">▶</div>`;
+        row.onclick = () => {
+          const tracks = item.tracks || [];
+          if (!tracks.length){ toast('Playlist is empty'); return; }
+          setQueue(tracks, 0);
+        };
+        plBox.appendChild(row);
+      });
+    }
+    if (up.error){ upBox.textContent = 'Could not load: ' + up.error.message; }
+    else if (!up.data.length){ upBox.textContent = 'No uploads yet.'; }
+    else {
+      upBox.innerHTML = '';
+      up.data.forEach(u => {
+        const row = document.createElement('div');
+        row.className = 'row';
+        row.style.cssText = 'cursor:pointer;grid-template-columns:1fr auto;min-height:0';
+        row.innerHTML = `<div style="min-width:0"><div class="title">${esc(u.title)}</div><div class="artist">${esc(u.artist || '')}</div></div><div class="muted">▶</div>`;
+        row.onclick = () => setQueue([uploadTrack(u)], 0);
+        upBox.appendChild(row);
+      });
+    }
+  }
+
+  async function publishPlaylist(pl){
+    if (!sb) return toast(SETUP_MSG, 4000);
+    const tracks = pl.tracks.map(t => ({ id: t.id, title: t.title, artist: t.artist, album: t.album, genre: t.genre, art: t.art, src: t.src, duration: t.duration, license: t.license, download: t.download }));
+    const { error } = await sb.from('playlists').insert({ owner_id: state.uid, name: pl.name, tracks });
+    if (error) return toast('Failed: ' + error.message, 4000);
+    toast('Published "' + pl.name + '" to your profile');
+  }
+
+  async function renderConversations(body, title, sub){
+    title.textContent = 'Messages';
+    sub.textContent = 'Text people you follow';
+    if (!sb){ body.innerHTML = '<div class="empty">' + esc(SETUP_MSG) + '</div>'; return; }
+    const { data, error } = await sb.from('messages')
+      .select('sender_id, recipient_id, body, created_at')
+      .or('sender_id.eq.' + state.uid + ',recipient_id.eq.' + state.uid)
+      .order('created_at', { ascending: false }).limit(200);
+    if (error){ body.textContent = 'Could not load: ' + error.message; return; }
+    const latest = new Map();
+    (data || []).forEach(m => {
+      const other = m.sender_id === state.uid ? m.recipient_id : m.sender_id;
+      if (!latest.has(other)) latest.set(other, m);
+    });
+    if (!latest.size){ body.innerHTML = '<div class="empty">No messages yet. Open someone\'s profile and tap Message.</div>'; return; }
+    await ensureProfiles([...latest.keys()]);
+    body.innerHTML = '';
+    latest.forEach((m, other) => {
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.style.cssText = 'cursor:pointer;grid-template-columns:1fr;min-height:0';
+      row.innerHTML = `<div style="min-width:0"><div class="title">${esc(nameOf(other))}</div><div class="artist">${esc(m.body)}</div></div>`;
+      row.onclick = () => openChat(other);
+      body.appendChild(row);
+    });
+  }
+
+  function openChat(id){ state.chatWith = id; state.view = 'chat'; state.artistView = null; render(); }
+
+  async function renderChat(body, title, sub){
+    const other = state.chatWith;
+    await getProfile(other);
+    title.textContent = nameOf(other);
+    sub.textContent = 'Messages are kept for 10 days';
+    body.innerHTML = `
+      <div id="chatLog" style="display:flex;flex-direction:column;gap:8px;max-height:55vh;overflow-y:auto;padding:4px"></div>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <input id="chatIn" maxlength="500" placeholder="Write a message" style="flex:1;min-width:0;padding:10px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:10px;font-size:16px">
+        <button class="btn2" id="chatSend" style="flex:none">Send</button>
+      </div>`;
+    const send = async () => {
+      const input = body.querySelector('#chatIn');
+      const text = input.value.trim();
+      if (!text) return;
+      const { error } = await sb.from('messages').insert({ sender_id: state.uid, recipient_id: other, body: text });
+      if (error){
+        toast(error.message.includes('row-level security') ? 'You can only message people you follow' : 'Failed: ' + error.message, 4000);
+        return;
+      }
+      input.value = '';
+      loadChat(other);
+    };
+    body.querySelector('#chatSend').onclick = send;
+    body.querySelector('#chatIn').onkeydown = e => { if (e.key === 'Enter') send(); };
+    loadChat(other);
+  }
+
+  async function loadChat(other){
+    const log = $('chatLog'); if (!log || !sb) return;
+    const { data, error } = await sb.from('messages')
+      .select('id, sender_id, body, created_at')
+      .or('and(sender_id.eq.' + state.uid + ',recipient_id.eq.' + other + '),and(sender_id.eq.' + other + ',recipient_id.eq.' + state.uid + ')')
+      .order('created_at', { ascending: true }).limit(200);
+    if (error){ log.textContent = 'Could not load: ' + error.message; return; }
+    if (!data.length){ log.innerHTML = '<div class="muted">No messages yet. Say hello.</div>'; return; }
+    log.innerHTML = '';
+    data.forEach(m => {
+      const mine = m.sender_id === state.uid;
+      const bubble = document.createElement('div');
+      bubble.style.cssText = 'align-self:' + (mine ? 'flex-end' : 'flex-start') +
+        ';max-width:78%;padding:9px 12px;border-radius:14px;font-size:14px;word-break:break-word;' +
+        (mine ? 'background:linear-gradient(135deg,var(--gold2),var(--gold3));color:#0A0A0A' : 'background:var(--card2);color:var(--text)');
+      bubble.textContent = m.body;
+      log.appendChild(bubble);
+    });
+    log.scrollTop = log.scrollHeight;
+  }
+
+  // Live: show new messages as they arrive
+  let realtimeOn = false;
+  function setupRealtime(){
+    if (!sb || realtimeOn) return;
+    realtimeOn = true;
+    sb.channel('kasi-messages')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, payload => {
+        const m = payload.new;
+        if (m.recipient_id !== state.uid) return;
+        if (state.view === 'chat' && state.chatWith === m.sender_id) loadChat(m.sender_id);
+        else if (state.view === 'messages') render();
+        getProfile(m.sender_id).then(() => toast('New message from ' + nameOf(m.sender_id), 3000));
+      })
+      .subscribe();
+  }
+
   async function loadLibrary(){
     const results = await Promise.allSettled(
       Object.entries(GENRE_TAGS).map(([g, tag]) => fetchTag(g, tag, 20))
@@ -1162,7 +1454,7 @@ img { max-width: 100%; }
     nav.appendChild(newBtn);
 
     const l2 = document.createElement('div'); l2.className = 'side-label'; l2.textContent = 'Social'; nav.appendChild(l2);
-    [['Explore','explore','i-globe'],['People','people','i-users'],['Feed','feed','i-feed']].forEach(([label,view,icon]) => {
+    [['Explore','explore','i-globe'],['People','people','i-users'],['Messages','messages','i-lib'],['Feed','feed','i-feed']].forEach(([label,view,icon]) => {
       const b = document.createElement('button');
       b.className = 'nav' + (state.view === view ? ' active' : '');
       b.innerHTML = `<svg width="18" height="18"><use href="#${icon}"/></svg> ${label}`;
@@ -1260,7 +1552,9 @@ img { max-width: 100%; }
       sub.textContent = pl.tracks.length + ' tracks · ' + (pl.public ? 'public' : 'private');
       actions.innerHTML = `
         <button class="btn2" id="dlAllBtn"><svg width="14" height="14"><use href="#i-download"/></svg> Save all</button>
-        <button class="btn2 ghost" id="editPlBtn">Edit</button>`;
+        <button class="btn2 ghost" id="editPlBtn">Edit</button>
+        <button class="btn2 ghost" id="pubPlBtn">Publish</button>`;
+      $('pubPlBtn').onclick = () => publishPlaylist(pl);
       $('dlAllBtn').onclick = () => { pl.tracks.forEach(t => t.saved = true); toast('Downloaded ' + pl.tracks.length + ' tracks'); render(); };
       $('editPlBtn').onclick = () => { const name = prompt('Rename playlist:', pl.name); if (!name?.trim()) return; pl.name = name.trim(); toast('Renamed'); render(); };
       if (!pl.tracks.length){ body.innerHTML = '<div style="text-align:center;padding:60px 20px;color:var(--muted)">Empty playlist.</div>'; return; }
@@ -1278,26 +1572,13 @@ img { max-width: 100%; }
 
     if (state.view === 'people'){
       title.textContent = 'People';
-      const people = [
-        { name: 'Alex', email: 'alex@kasi.fm', playlists: 5, art: artistArtURL('alex', 100), following: false },
-        { name: 'Zara', email: 'zara@kasi.fm', playlists: 2, art: artistArtURL('zara', 100), following: true },
-        { name: 'Sam', email: 'sam@kasi.fm', playlists: 2, art: artistArtURL('sam', 100), following: false },
-      ];
-      sub.textContent = people.length + ' members';
-      body.innerHTML = '';
-      people.forEach(p => {
-        const row = document.createElement('div');
-        row.style.cssText = 'display:grid;grid-template-columns:48px 1fr auto;gap:14px;align-items:center;padding:14px 8px;border-bottom:1px solid var(--line)';
-        row.innerHTML = `
-          <div style="width:48px;height:48px;border-radius:50%;overflow:hidden;background:var(--gray);border:1px solid var(--line)"><img src="${p.art}" style="width:100%;height:100%;object-fit:cover;display:block" loading="lazy" alt=""></div>
-          <div><div style="font-weight:600">${esc(p.name)}</div><div style="font-size:12.5px;color:var(--muted)">${p.playlists} playlists · ${esc(p.email)}</div></div>
-          <button class="btn2 ${p.following ? 'ghost' : ''}" style="font-size:12px;padding:8px 16px;flex:none">${p.following ? 'Following' : 'Follow'}</button>`;
-        const btn = row.querySelector('button');
-        btn.onclick = () => { p.following = !p.following; btn.textContent = p.following ? 'Following' : 'Follow'; btn.className = 'btn2 ' + (p.following ? 'ghost' : ''); toast(p.following ? 'Following ' + p.name : 'Unfollowed'); };
-        body.appendChild(row);
-      });
+      sub.textContent = 'Find friends, follow them, and see what they share';
+      renderSocial(body);
       return;
     }
+    if (state.view === 'profile'){ renderProfile(body, title, sub); return; }
+    if (state.view === 'messages'){ renderConversations(body, title, sub); return; }
+    if (state.view === 'chat'){ renderChat(body, title, sub); return; }
 
     if (state.view === 'admin'){
       if (!state.isAdmin){ go('home'); return; }
@@ -1881,6 +2162,17 @@ img { max-width: 100%; }
   $('studyBtn').onclick = openStudy;
   $('adminBtn').onclick = () => go('admin');
   $('uploadBtn').onclick = () => go('upload');
+  // My Library and Social buttons in the sidebar
+  document.querySelectorAll('aside [data-view]').forEach(b => {
+    b.onclick = () => go(b.dataset.view);
+  });
+  $('newPlBtn').onclick = () => {
+    const name = prompt('Playlist name:');
+    if (!name || !name.trim()) return;
+    state.playlists.push({ id: 'p' + Date.now(), name: name.trim(), tracks: [], public: true });
+    toast('Created "' + name.trim() + '"');
+    render();
+  };
   $('studyExit').onclick = closeStudy;
   $('studyPlay').onclick = () => { state.playing = !state.playing; syncAudio(); updatePlayer(); };
   $('studyNext').onclick = () => nextTrack(false);
@@ -1936,6 +2228,8 @@ img { max-width: 100%; }
   function enterApp(user){
     const name = (user.user_metadata && user.user_metadata.name) || user.email.split('@')[0];
     state.user = { name, email: user.email };
+    state.uid = user.id;
+    setupRealtime();
     $('who').textContent = name;
     $('whoD').textContent = name;
     $('login').classList.add('off');
